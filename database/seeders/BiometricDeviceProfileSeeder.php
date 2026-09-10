@@ -7,7 +7,7 @@ use Illuminate\Database\Seeder;
 
 class BiometricDeviceProfileSeeder extends Seeder
 {
-    public function run()
+    public function run(): void
     {
         $profiles = [
             // ZKSoftware
@@ -136,7 +136,10 @@ class BiometricDeviceProfileSeeder extends Seeder
         ];
 
         foreach ($profiles as $profile) {
-            BiometricDeviceProfile::create(array_merge($profile, [
+            BiometricDeviceProfile::updateOrCreate([
+                'manufacturer' => $profile['manufacturer'],
+                'model' => $profile['model'],
+            ], array_merge($profile, [
                 'is_active' => true,
                 'commands' => [
                     'connect', 'disconnect', 'get_user', 'set_user',
