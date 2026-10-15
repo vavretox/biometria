@@ -15,8 +15,13 @@ use Illuminate\View\View;
 
 class WorkScheduleController extends Controller
 {
-    public function index(): View
+    public function index(Request $request): View
     {
+        $filters = $request->validate([
+            'employee_id' => ['nullable', 'integer', 'exists:employees,id'],
+            'schedule_id' => ['nullable', 'integer', 'exists:work_schedules,id'],
+        ]);
+        $selectedEmployeeId = $filters['employee_id'] ?? null;
         $today = today()->toDateString();
 
         return view('schedules.index', [
@@ -25,12 +30,15 @@ class WorkScheduleController extends Controller
                     ->whereDate('starts_on', '<=', $today)
                     ->where(fn ($query) => $query->whereNull('ends_on')->orWhereDate('ends_on', '>=', $today))])
                 ->orderBy('name')->get(),
+            'selectedScheduleId' => $filters['schedule_id'] ?? null,
             'employees' => Employee::where('is_active', true)->orderBy('last_name')->get(),
-            'assignments' => WorkScheduleAssignment::with([
+            'selectedEmployeeId' => $selectedEmployeeId,
+            'assignmentEmployees' => Employee::whereHas('scheduleAssignments')->orderBy('last_name')->get(['id', 'first_name', 'last_name', 'maternal_last_name', 'item_number']),
+            'assignments' => $selectedEmployeeId ? WorkScheduleAssignment::with([
                 'employee:id,first_name,last_name,maternal_last_name,item_number,office_id',
                 'employee.office:id,name',
                 'workSchedule:id,name',
-            ])->latest('starts_on')->latest('id')->paginate(20),
+            ])->where('employee_id', $selectedEmployeeId)->latest('starts_on')->latest('id')->paginate(20)->withQueryString() : null,
         ]);
     }
 
@@ -71,20 +79,22 @@ class WorkScheduleController extends Controller
             'employee_ids' => ['required_unless:assignment_scope,all', 'array', 'min:1'],
             'employee_ids.*' => ['integer', 'distinct', 'exists:employees,id'],
             'work_schedule_id' => ['required', 'exists:work_schedules,id'],
-            'period_type' => ['required', Rule::in(['day', 'week', 'month', 'year', 'indefinite', 'custom'])],
+            'weekdays' => [Rule::excludeIf($request->input('starts_on') === $request->input('ends_on')), 'required_with:weekdays_present', 'array', 'min:1', 'max:7'],
+            'weekdays.*' => ['integer', 'distinct', 'between:1,7'],
             'starts_on' => ['required', 'date'],
-            'ends_on' => ['nullable', 'date', 'after_or_equal:starts_on', 'required_if:period_type,custom'],
+            'ends_on' => ['required', 'date', 'after_or_equal:starts_on'],
+        ], [
+            'ends_on.required' => 'Seleccione la fecha final del horario.',
+            'ends_on.after_or_equal' => 'La fecha final debe ser igual o posterior a la fecha de inicio.',
+            'weekdays.required_with' => 'Seleccione al menos un día para aplicar el horario.',
+            'weekdays.min' => 'Seleccione al menos un día para aplicar el horario.',
         ]);
 
         $startsOn = CarbonImmutable::parse($data['starts_on'])->startOfDay();
-        $endsOn = match ($data['period_type']) {
-            'day' => $startsOn,
-            'week' => $startsOn->addDays(6),
-            'month' => $startsOn->addMonth()->subDay(),
-            'year' => $startsOn->addYear()->subDay(),
-            'custom' => CarbonImmutable::parse($data['ends_on'])->startOfDay(),
-            default => null,
-        };
+        $endsOn = CarbonImmutable::parse($data['ends_on'])->startOfDay();
+        $weekdays = $startsOn->isSameDay($endsOn)
+            ? [$startsOn->dayOfWeekIso]
+            : array_map('intval', $data['weekdays'] ?? range(1, 7));
         $schedule = WorkSchedule::findOrFail($data['work_schedule_id']);
         $employees = Employee::query()->where('is_active', true)
             ->when(
@@ -92,9 +102,11 @@ class WorkScheduleController extends Controller
                 fn ($query) => $query->whereIn('id', $data['employee_ids']),
             )->get();
 
-        foreach ($employees as $employee) {
-            $assignmentService->assign($employee, $schedule, $startsOn, $endsOn, $request->user()->id);
-        }
+        DB::transaction(function () use ($employees, $assignmentService, $schedule, $startsOn, $endsOn, $request, $weekdays): void {
+            foreach ($employees->sortBy('id') as $employee) {
+                $assignmentService->assign($employee, $schedule, $startsOn, $endsOn, $request->user()->id, $weekdays);
+            }
+        });
 
         return back()->with('success', 'Horario asignado a '.$employees->count().' empleado(s) para el periodo indicado.');
     }

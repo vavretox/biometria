@@ -48,16 +48,23 @@
 @if(auth()->user()->is_admin)
 <div class='rounded-2xl bg-white p-6 shadow-sm'>
 <h2 class='text-lg font-bold'>Tipos de permiso</h2>
-<p class='mb-4 text-sm text-slate-500'>Administra hasta 20 opciones visibles en un espacio compacto.</p>
+<p class='mb-4 text-sm text-slate-500'>Pulsa Editar para cambiar el nombre o el estado de un tipo de permiso.</p>
 <div class='max-h-[30rem] overflow-y-auto rounded-xl border border-slate-200'>
 <div class='grid divide-y divide-slate-200 lg:grid-cols-2 lg:divide-y-0'>
 @foreach($leaveTypes as $leaveType)
+@php
+    $isEditingLeaveType = (string) old('editing_leave_type') === (string) $leaveType->id;
+@endphp
 <div class='flex min-w-0 items-center gap-2 border-slate-200 px-3 py-2 lg:border-b lg:odd:border-r'>
-<form method='POST' action='{{ route('leave-types.update', $leaveType) }}' class='flex min-w-0 flex-1 items-center gap-2'>@csrf @method('PUT')
+<form method='POST' action='{{ route('leave-types.update', $leaveType) }}' class='flex min-w-0 flex-1 flex-wrap items-center gap-2'>@csrf @method('PUT')
+<input type='hidden' name='editing_leave_type' value='{{ $leaveType->id }}'>
 <span class='w-9 shrink-0 rounded-md px-1.5 py-1 text-center text-[11px] font-bold text-white' style='background-color: {{ $leaveType->color }}' title='Color y abreviatura asignados por el sistema'>{{ $leaveType->abbreviation }}</span>
-<input name='name' value='{{ $leaveType->name }}' required maxlength='100' aria-label='Nombre del tipo de permiso' class='min-w-0 flex-1 border-0 bg-transparent px-1 py-1 text-sm focus:ring-0'>
-<select name='is_active' aria-label='Estado del tipo de permiso' class='w-24 rounded-lg border-slate-300 py-1 pl-2 pr-7 text-xs'><option value='1' @selected($leaveType->is_active)>Activo</option><option value='0' @selected(! $leaveType->is_active)>Inactivo</option></select>
-<button class='rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white'>Guardar</button></form>
+<input name='name' value='{{ $isEditingLeaveType ? old('name', $leaveType->name) : $leaveType->name }}' required maxlength='100' @readonly(! $isEditingLeaveType) aria-label='Nombre del tipo de permiso' class='min-w-24 flex-1 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm read-only:border-transparent read-only:bg-transparent focus:outline-2 focus:outline-blue-500'>
+<select name='is_active' @disabled(! $isEditingLeaveType) aria-label='Estado del tipo de permiso' class='min-h-10 w-24 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs disabled:border-transparent disabled:bg-transparent disabled:text-slate-600'><option value='1' @selected($isEditingLeaveType ? old('is_active', $leaveType->is_active) : $leaveType->is_active)>Activo</option><option value='0' @selected($isEditingLeaveType ? ! old('is_active', $leaveType->is_active) : ! $leaveType->is_active)>Inactivo</option></select>
+<button type='button' data-leave-type-edit onclick='editLeaveType(this.form)' aria-label='Editar {{ $leaveType->name }}' @class(['min-h-10 rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50', 'hidden' => $isEditingLeaveType])>Editar</button>
+<button type='submit' data-leave-type-save @class(['min-h-10 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700', 'hidden' => ! $isEditingLeaveType])>Guardar</button>
+<button type='button' data-leave-type-cancel onclick='cancelLeaveTypeEdit(this.form)' @class(['min-h-10 rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100', 'hidden' => ! $isEditingLeaveType])>Cancelar</button>
+</form>
 <form method='POST' action='{{ route('leave-types.destroy', $leaveType) }}'>@csrf @method('DELETE')<button class='px-1 py-1.5 text-xs font-semibold text-rose-600' title='Eliminar {{ $leaveType->name }}'>Eliminar</button></form>
 </div>
 @endforeach
@@ -99,4 +106,22 @@
 </div>
 </aside>
 </div>
+<script>
+function setLeaveTypeEditing(form, isEditing) {
+    form.elements.name.readOnly = !isEditing;
+    form.elements.is_active.disabled = !isEditing;
+    form.querySelector('[data-leave-type-edit]').classList.toggle('hidden', isEditing);
+    form.querySelector('[data-leave-type-save]').classList.toggle('hidden', !isEditing);
+    form.querySelector('[data-leave-type-cancel]').classList.toggle('hidden', !isEditing);
+}
+function editLeaveType(form) {
+    setLeaveTypeEditing(form, true);
+    form.elements.name.focus();
+    form.elements.name.select();
+}
+function cancelLeaveTypeEdit(form) {
+    form.reset();
+    setLeaveTypeEditing(form, false);
+}
+</script>
 @endsection

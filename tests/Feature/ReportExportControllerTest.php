@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Models\WorkSchedule;
 use App\Models\WorkScheduleAssignment;
 use App\Models\WorkUnit;
+use App\Services\DailyAttendanceReportService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -19,6 +20,31 @@ use Tests\TestCase;
 class ReportExportControllerTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_clearing_report_filters_restores_defaults_without_results(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-10-07 12:00:00'));
+        $user = User::factory()->create();
+        Employee::factory()->create();
+
+        $this->actingAs($user)->get(route('reports.index', [
+            'from' => '2026-09-01',
+            'to' => '2026-09-30',
+            'custom_fields' => 1,
+            'excel_layout' => 'single_sheet',
+        ]))->assertSee('Vista previa del Excel')->assertViewHas('reportRequested', true);
+
+        $this->get(route('reports.index'))
+            ->assertOk()
+            ->assertDontSee('Vista previa del Excel')
+            ->assertDontSee('data-report-sheet', false)
+            ->assertViewHas('reportRequested', false)
+            ->assertViewHas('dailyReports', fn ($reports): bool => $reports->isEmpty())
+            ->assertViewHas('from', fn ($from): bool => $from->toDateString() === '2026-10-01')
+            ->assertViewHas('to', fn ($to): bool => $to->toDateString() === '2026-10-31')
+            ->assertViewHas('selectedFields', DailyAttendanceReportService::DefaultFields)
+            ->assertViewHas('selectedColumns', DailyAttendanceReportService::DefaultColumns);
+    }
 
     public function test_export_builds_daily_marks_holidays_schedules_and_lateness_for_the_unit(): void
     {

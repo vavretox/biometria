@@ -2,17 +2,21 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\AttendanceReportRequest;
 use App\Models\Attendance;
+use App\Models\Biometric\BiometricDevice;
 use App\Models\Employee;
 use App\Models\Holiday;
 use App\Models\WorkUnit;
+use App\Services\DailyAttendanceReportService;
+use App\Services\PayrollReportService;
 use Carbon\CarbonPeriod;
-use Illuminate\Http\Request;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\View\View;
 
 class ReportController extends Controller
 {
-    public function index(Request $request): View
+    public function index(AttendanceReportRequest $request, DailyAttendanceReportService $dailyReportService, PayrollReportService $payrollService): View
     {
         $from = $request->date('from')?->startOfDay() ?? now()->startOfMonth();
         $to = $request->date('to')?->endOfDay() ?? now()->endOfMonth();
@@ -25,43 +29,17 @@ class ReportController extends Controller
             ? $request->string('schedule_type')->toString()
             : null;
 
-        $overlapsPeriod = fn ($query) => $query
-            ->whereDate('starts_on', '<=', $to->toDateString())
-            ->where(fn ($query) => $query->whereNull('ends_on')->orWhereDate('ends_on', '>=', $from->toDateString()));
-
-        $employees = Employee::with([
-            'workUnit:id,name',
-            'attendances' => fn ($query) => $query->whereBetween('checked_at', [$from, $to])->oldest('checked_at'),
-            'scheduleAssignments' => fn ($query) => $overlapsPeriod($query)
-                ->with('workSchedule.days')
-                ->oldest('starts_on'),
-            'leaveRequests' => fn ($query) => $query
-                ->where('status', 'approved')
-                ->whereDate('starts_on', '<=', $to)
-                ->whereDate('ends_on', '>=', $from)
-                ->with('leaveType:id,name,abbreviation,color'),
-        ])
-            ->when($request->integer('work_unit_id'), fn ($query, $unitId) => $query->where('work_unit_id', $unitId))
-            ->when($request->integer('employee_id'), fn ($query, $employeeId) => $query->whereKey($employeeId))
-            ->when($scheduleType, fn ($query, $type) => $query->whereHas(
-                'scheduleAssignments',
-                fn ($query) => $overlapsPeriod($query)->whereHas(
-                    'workSchedule',
-                    fn ($query) => $type === 'split'
-                        ? $query->whereHas('days', fn ($query) => $query->whereNotNull('second_starts_at'))
-                        : $query->whereDoesntHave('days', fn ($query) => $query->whereNotNull('second_starts_at')),
-                ),
-            ))
-            ->withCount([
-                'leaveRequests as approved_leave_count' => fn ($query) => $query->where('status', 'approved')->whereDate('starts_on', '<=', $to)->whereDate('ends_on', '>=', $from),
-            ])
-            ->orderBy('last_name')->get();
+        $reportType = $request->validated('report_type') ?? 'attendance';
+        $reportRequested = $request->reportRequested && $reportType !== 'audit';
+        $employees = $reportRequested
+            ? $dailyReportService->employees($request->validated(), $from, $to)
+            : new Collection;
 
         $employees->each(function (Employee $employee) use ($scheduleType): void {
             $attendances = $employee->attendances
                 ->when($scheduleType, function ($attendances, $type) use ($employee) {
                     return $attendances->filter(function (Attendance $attendance) use ($employee, $type): bool {
-                        $schedule = $employee->scheduleForDate($attendance->checked_at);
+                        $schedule = $employee->attendanceScheduleForDate($attendance->checked_at);
                         $isSplit = $schedule?->days->contains(fn ($day): bool => $day->second_starts_at !== null) ?? false;
 
                         return $schedule !== null && ($type === 'split' ? $isSplit : ! $isSplit);
@@ -113,9 +91,24 @@ class ReportController extends Controller
                 ->map(fn (Holiday $holiday): array => ['holiday' => $holiday, 'date' => $date->copy()]))
             ->values();
 
+        $reports = $employees->take(10)->map(fn (Employee $employee): array => $dailyReportService->build($employee, $from, $to, $holidayDefinitions, $scheduleType));
+        $fields = $request->validated('report_fields');
+        $columns = $request->validated('extra_columns');
+        $reports = $reports->map(fn (array $report): array => [...$report, 'metadata' => $dailyReportService->metadata($report['employee'], $fields)]);
+
         return view('reports.index', [
+            'reportRequested' => $reportRequested,
+            'reportType' => $reportType,
+            'excelLayout' => $request->validated('excel_layout') ?? ($reportType === 'payroll' ? 'single_sheet' : 'per_employee'),
+            'payrollRows' => $reportType === 'payroll' ? $payrollService->rows($reports) : collect(),
             'employees' => $employees,
-            'employeeOptions' => Employee::where('is_active', true)->orderBy('last_name')->get(),
+            'dailyReports' => $reports,
+            'fieldOptions' => DailyAttendanceReportService::Fields,
+            'columnOptions' => DailyAttendanceReportService::Columns,
+            'selectedFields' => $fields,
+            'selectedColumns' => $columns,
+            'devices' => BiometricDevice::orderBy('device_name')->get(['id', 'device_name']),
+            'employeeOptions' => Employee::orderBy('last_name')->get(['id', 'first_name', 'last_name', 'maternal_last_name', 'work_unit_id']),
             'from' => $from,
             'to' => $to,
             'scheduleType' => $scheduleType,

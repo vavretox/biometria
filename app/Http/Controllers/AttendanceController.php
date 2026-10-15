@@ -3,22 +3,43 @@
 namespace App\Http\Controllers;
 
 use App\Models\Attendance;
+use App\Models\Biometric\BiometricDevice;
 use App\Models\Employee;
+use App\Models\LeaveRequest;
 use App\Models\LeaveType;
+use App\Models\WorkUnit;
+use App\Services\AttendanceSummaryService;
 use App\Services\AutomaticAttendanceService;
-use Carbon\Carbon;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
-use Illuminate\Support\Collection;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class AttendanceController extends Controller
 {
     public function __construct(private readonly AutomaticAttendanceService $automaticAttendanceService) {}
 
-    public function index(Request $request): View
+    public function index(Request $request, AttendanceSummaryService $summaryService): View
     {
+        $request->validate([
+            'from' => ['nullable', 'date_format:Y-m-d'],
+            'to' => ['nullable', 'date_format:Y-m-d'],
+            'search' => ['nullable', 'string', 'max:100'],
+            'employee_id' => ['nullable', 'integer', 'exists:employees,id'],
+            'work_unit_id' => ['nullable', 'integer', 'exists:work_units,id'],
+            'device_id' => ['nullable', 'integer', 'exists:biometric_devices,id'],
+            'mark_filter' => ['nullable', Rule::in(['with_marks', 'without_marks', 'with_leave'])],
+            'per_page' => ['nullable', Rule::in([15, 25, 50])],
+            'selected_employee' => ['nullable', 'integer', 'exists:employees,id'],
+            'selected_date' => ['nullable', 'required_with:selected_employee', 'date_format:Y-m-d'],
+            'selected_time' => ['nullable', 'required_with:selected_employee', 'date_format:H:i'],
+            'selected_type' => ['nullable', Rule::in(['in', 'out', 'break_in', 'break_out'])],
+        ]);
+
+        $searchRequested = $request->query() !== [];
+
         $from = $request->date('from')?->startOfDay() ?? today()->startOfDay();
         $to = $request->date('to')?->endOfDay() ?? $from->copy()->endOfDay();
 
@@ -26,34 +47,75 @@ class AttendanceController extends Controller
             [$from, $to] = [$to->copy()->startOfDay(), $from->copy()->endOfDay()];
         }
 
-        if (today()->betweenIncluded($from, $to)) {
+        if ($from->diffInDays($to->copy()->startOfDay()) > 30) {
+            throw ValidationException::withMessages(['to' => 'Seleccione un período de hasta 31 días.']);
+        }
+
+        if ($searchRequested && today()->betweenIncluded($from, $to)) {
             $this->automaticAttendanceService->generate(today());
         }
 
-        $attendances = Attendance::with([
-            'employee:id,first_name,last_name,maternal_last_name,work_schedule_id',
-            'employee.workSchedule.days',
-            'employee.scheduleAssignments' => fn ($query) => $query
-                ->whereDate('starts_on', '<=', $to->toDateString())
-                ->where(fn ($query) => $query->whereNull('ends_on')->orWhereDate('ends_on', '>=', $from->toDateString()))
-                ->with('workSchedule.days'),
-        ])
-            ->whereBetween('checked_at', [$from, $to])
-            ->when($request->integer('employee_id'), fn ($query, $employeeId) => $query->where('employee_id', $employeeId))
-            ->oldest('checked_at')
-            ->get();
-        $dailySummaries = $this->paginateDailySummaries($this->dailySummaries($attendances), $request);
+        $marksInPeriod = fn ($query) => $query->whereBetween('checked_at', [$from, $to])
+            ->when($request->integer('device_id'), fn ($query, $deviceId) => $query->where('device_id', $deviceId));
+        $leavesInPeriod = fn ($query) => $query->whereIn('status', ['pending', 'approved'])
+            ->whereDate('starts_on', '<=', $to->toDateString())->whereDate('ends_on', '>=', $from->toDateString());
+        $employees = $searchRequested ? Employee::query()
+            ->where(fn ($query) => $query->where('is_active', true)->orWhereHas('attendances', $marksInPeriod))
+            ->when($request->filled('search'), function ($query) use ($request): void {
+                foreach (preg_split('/\s+/u', trim($request->string('search')->toString()), -1, PREG_SPLIT_NO_EMPTY) as $word) {
+                    $query->where(function ($query) use ($word): void {
+                        foreach (['first_name', 'last_name', 'maternal_last_name', 'employee_code', 'identity_document', 'biometric_id'] as $index => $column) {
+                            if ($index === 0) {
+                                $query->where($column, 'like', '%'.$word.'%');
+                            } else {
+                                $query->orWhere($column, 'like', '%'.$word.'%');
+                            }
+                        }
+                    });
+                }
+            })
+            ->when($request->integer('employee_id'), fn ($query, $id) => $query->whereKey($id))
+            ->when($request->integer('work_unit_id'), fn ($query, $id) => $query->where('work_unit_id', $id))
+            ->when($request->integer('device_id'), fn ($query, $deviceId) => $query->where(fn ($query) => $query
+                ->whereHas('attendances', fn ($query) => $query->where('device_id', $deviceId))
+                ->orWhereHas('biometricTemplates', fn ($query) => $query->where('device_id', $deviceId))))
+            ->when($request->input('mark_filter') === 'with_marks', fn ($query) => $query->whereHas('attendances', $marksInPeriod))
+            ->when($request->input('mark_filter') === 'without_marks', fn ($query) => $query->whereDoesntHave('attendances', $marksInPeriod))
+            ->when($request->input('mark_filter') === 'with_leave', fn ($query) => $query->whereHas('leaveRequests', $leavesInPeriod))
+            ->with([
+                'workUnit:id,name', 'workSchedule.days',
+                'scheduleAssignments' => fn ($query) => $query->whereDate('starts_on', '<=', $to->toDateString())
+                    ->where(fn ($query) => $query->whereNull('ends_on')->orWhereDate('ends_on', '>=', $from->toDateString()))
+                    ->with('workSchedule.days'),
+                'attendances' => $marksInPeriod,
+                'leaveRequests' => fn ($query) => $leavesInPeriod($query)->with('leaveType:id,name'),
+            ])
+            ->orderBy('last_name')->orderBy('first_name')->orderBy('id')
+            ->paginate($request->integer('per_page', 25))->withQueryString()
+            : new LengthAwarePaginator([], 0, 25);
+        $dailySummaries = $employees->through(fn (Employee $employee): array => $summaryService->summarize($employee, $from, $to));
         $editableAttendance = $request->user()?->is_admin && $request->integer('edit_attendance')
             ? Attendance::findOrFail($request->integer('edit_attendance'))
             : null;
 
+        $editableLeave = $request->user()?->is_admin && $request->integer('edit_leave')
+            ? LeaveRequest::findOrFail($request->integer('edit_leave'))
+            : null;
+
         return view('attendance.index', [
+            'searchRequested' => $searchRequested,
             'from' => $from,
             'to' => $to,
-            'employees' => Employee::where('is_active', true)->orderBy('last_name')->get(),
+            'employees' => Employee::whereIn('id', $dailySummaries->getCollection()->pluck('employee.id')
+                ->push($editableLeave?->employee_id, $editableAttendance?->employee_id, $request->integer('selected_employee'), old('employee_id'))->filter()->unique())
+                ->orderBy('last_name')->get(['id', 'first_name', 'last_name']),
+            'workUnits' => WorkUnit::where('is_active', true)->orderBy('name')->get(['id', 'name']),
+            'filterDevices' => BiometricDevice::orderBy('device_name')->get(['id', 'device_name']),
+            'devices' => BiometricDevice::active()->orderBy('device_name')->get(['id', 'device_name']),
             'dailySummaries' => $dailySummaries,
             'editableAttendance' => $editableAttendance,
-            'leaveTypes' => LeaveType::where('is_active', true)->orderBy('name')->get(),
+            'editableLeave' => $editableLeave,
+            'leaveTypes' => LeaveType::where(fn ($query) => $query->where('is_active', true)->when($editableLeave?->leave_type_id, fn ($query, $id) => $query->orWhere('id', $id)))->orderBy('name')->get(),
         ]);
     }
 
@@ -88,63 +150,6 @@ class AttendanceController extends Controller
         $attendance->delete();
 
         return back()->with('success', 'Marcación eliminada correctamente.');
-    }
-
-    /** @param Collection<int, Attendance> $attendances */
-    private function dailySummaries(Collection $attendances): Collection
-    {
-        return $attendances
-            ->groupBy(fn (Attendance $attendance): string => $attendance->employee_id.'|'.$attendance->checked_at->toDateString())
-            ->map(function (Collection $marks): array {
-                $marks = $marks->sortBy('checked_at')->values();
-                $firstMark = $marks->first();
-                $employee = $firstMark->employee;
-                $date = $firstMark->checked_at->copy()->startOfDay();
-                $schedule = $employee->scheduleForDate($date) ?? $employee->workSchedule;
-                $scheduleDay = $schedule?->days->firstWhere('day_of_week', $date->isoWeekday());
-                $expectedTimes = $scheduleDay && $scheduleDay->is_working_day
-                    ? collect([$scheduleDay->starts_at, $scheduleDay->ends_at, $scheduleDay->second_starts_at, $scheduleDay->second_ends_at])->filter()->values()
-                    : collect();
-                $labels = $expectedTimes->count() === 4
-                    ? ['Entrada', 'Salida mediodía', 'Retorno', 'Salida']
-                    : ['Entrada', 'Salida'];
-                $slotCount = max($expectedTimes->count(), $marks->count());
-                $slots = collect(range(0, max(0, $slotCount - 1)))->map(function (int $index) use ($date, $expectedTimes, $labels, $marks): array {
-                    $mark = $marks->get($index);
-                    $expectedTime = $expectedTimes->get($index);
-                    $difference = null;
-
-                    if ($mark && $expectedTime) {
-                        $scheduledAt = Carbon::parse($date->toDateString().' '.$expectedTime, $date->timezone);
-                        $difference = (int) $scheduledAt->diffInMinutes($mark->checked_at, false);
-                    }
-
-                    return [
-                        'label' => $labels[$index] ?? 'Marcación adicional',
-                        'expected_time' => $expectedTime ? mb_substr($expectedTime, 0, 5) : null,
-                        'mark' => $mark,
-                        'difference' => $difference,
-                    ];
-                });
-
-                return compact('employee', 'date', 'schedule', 'slots');
-            })
-            ->sortByDesc(fn (array $summary): string => $summary['date']->format('Y-m-d').'|'.str_pad((string) $summary['employee']->id, 10, '0', STR_PAD_LEFT))
-            ->values();
-    }
-
-    private function paginateDailySummaries(Collection $summaries, Request $request): LengthAwarePaginator
-    {
-        $page = LengthAwarePaginator::resolveCurrentPage();
-        $perPage = 20;
-
-        return new LengthAwarePaginator(
-            $summaries->forPage($page, $perPage)->values(),
-            $summaries->count(),
-            $perPage,
-            $page,
-            ['path' => $request->url(), 'query' => $request->query()],
-        );
     }
 
     /** @return array{checked_at: string, type: string, status: string, late_minutes: int, observation: string} */

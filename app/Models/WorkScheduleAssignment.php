@@ -12,7 +12,7 @@ class WorkScheduleAssignment extends Model
     /** @use HasFactory<WorkScheduleAssignmentFactory> */
     use HasFactory;
 
-    protected $fillable = ['employee_id', 'work_schedule_id', 'starts_on', 'ends_on', 'assigned_by'];
+    protected $fillable = ['employee_id', 'work_schedule_id', 'starts_on', 'ends_on', 'assigned_by', 'weekdays'];
 
     public function employee(): BelongsTo
     {
@@ -31,6 +31,6 @@ class WorkScheduleAssignment extends Model
 
     protected function casts(): array
     {
-        return ['starts_on' => 'date', 'ends_on' => 'date'];
+        return ['starts_on' => 'date', 'ends_on' => 'date', 'weekdays' => 'array'];
     }
 }

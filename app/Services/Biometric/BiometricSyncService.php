@@ -18,7 +18,7 @@ class BiometricSyncService
     {
         $employees = Employee::query()
             ->where('is_active', true)
-            ->when($employeeIds, fn (Builder $query) => $query->whereIn('id', $employeeIds))
+            ->when($employeeIds !== null, fn (Builder $query) => $query->whereIn('id', $employeeIds))
             ->with(['biometricTemplates' => fn ($query) => $query->where('device_id', $device->id)])
             ->orderBy('id')
             ->get();
@@ -64,10 +64,11 @@ class BiometricSyncService
         return compact('sent', 'fingerprints', 'errors');
     }
 
-    /** @return array{matched: int, fingerprints: int, unmatched: int, without_fingerprints: int} */
-    public function pullEmployeesAndFingerprints(BiometricDevice $device): array
+    /** @return array{matched: int, created: int, fingerprints: int, unmatched: int, without_fingerprints: int} */
+    public function pullEmployeesAndFingerprints(BiometricDevice $device, bool $includeFingerprints = true): array
     {
         $matched = 0;
+        $created = 0;
         $fingerprints = 0;
         $unmatched = 0;
         $withoutFingerprints = 0;
@@ -76,21 +77,39 @@ class BiometricSyncService
         try {
             foreach ($this->deviceService->getUsers($device->id) as $user) {
                 $uid = (int) ($user['uid'] ?? 0);
-                $employee = Employee::query()
-                    ->where('biometric_id', $uid)
-                    ->orWhere('employee_code', (string) ($user['userid'] ?? ''))
-                    ->first();
-
-                if (! $employee) {
+                $employeeCode = trim((string) ($user['userid'] ?? ''));
+                if ($uid < 1 || $employeeCode === '' || mb_strlen($employeeCode) > 50) {
                     $unmatched++;
 
                     continue;
+                }
+                $employee = Employee::withTrashed()->where('employee_code', $employeeCode)->first()
+                    ?? Employee::withTrashed()->where('biometric_id', $uid)->first();
+
+                if ($employee?->trashed() || ($employee && $employee->biometric_id && (int) $employee->biometric_id !== $uid)) {
+                    $unmatched++;
+
+                    continue;
+                }
+
+                if (! $employee) {
+                    $employee = Employee::create([
+                        'employee_code' => $employeeCode, 'biometric_id' => $uid,
+                        'first_name' => mb_substr(trim((string) ($user['name'] ?? '')), 0, 100) ?: 'Usuario '.$employeeCode,
+                        'last_name' => '', 'identity_document' => null,
+                        'attendance_method' => 'biometric', 'is_active' => true,
+                    ]);
+                    $created++;
                 }
 
                 if (! $employee->biometric_id) {
                     $employee->update(['biometric_id' => $uid]);
                 }
                 $matched++;
+
+                if (! $includeFingerprints) {
+                    continue;
+                }
 
                 $deviceFingerprints = $this->deviceService->getFingerprints($device->id, $uid);
 
@@ -117,6 +136,7 @@ class BiometricSyncService
 
         return [
             'matched' => $matched,
+            'created' => $created,
             'fingerprints' => $fingerprints,
             'unmatched' => $unmatched,
             'without_fingerprints' => $withoutFingerprints,
@@ -209,7 +229,7 @@ class BiometricSyncService
     /** @return array{status: string, late_minutes: int} */
     private function evaluateSchedule(Employee $employee, Carbon $checkedAt, string $type): array
     {
-        $schedule = $employee->scheduleForDate($checkedAt) ?? $employee->workSchedule;
+        $schedule = $employee->attendanceScheduleForDate($checkedAt);
         $scheduleDay = $schedule?->days->firstWhere('day_of_week', $checkedAt->isoWeekday());
 
         if (! $scheduleDay || ! $scheduleDay->is_working_day) {

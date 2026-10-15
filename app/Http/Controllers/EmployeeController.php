@@ -8,6 +8,9 @@ use App\Models\Employee;
 use App\Models\WorkUnit;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 
 class EmployeeController extends Controller
@@ -15,9 +18,17 @@ class EmployeeController extends Controller
     /**
      * Display a listing of the resource.
      */
-    public function index(): View
+    public function index(Request $request): View
     {
+        $request->validate([
+            'search' => ['nullable', 'string', 'max:100'],
+            'work_unit_id' => ['nullable', 'integer', 'exists:work_units,id'],
+            'is_active' => ['nullable', 'boolean'],
+            'attendance_method' => ['nullable', Rule::in(['biometric', 'access_code', 'automatic'])],
+        ]);
+
         return view('employees.index', [
+            'workUnits' => $this->workUnits(),
             'employees' => Employee::with('workUnit:id,name')
                 ->withCount('biometricTemplates')
                 ->when(request('search'), function ($query, $search): void {
@@ -26,9 +37,14 @@ class EmployeeController extends Controller
                         $query->where('employee_code', 'like', $term)
                             ->orWhere('first_name', 'like', $term)
                             ->orWhere('last_name', 'like', $term)
+                            ->orWhere('maternal_last_name', 'like', $term)
+                            ->orWhere('biometric_id', 'like', $term)
                             ->orWhere('identity_document', 'like', $term);
                     });
                 })
+                ->when($request->filled('work_unit_id'), fn ($query) => $query->where('work_unit_id', $request->integer('work_unit_id')))
+                ->when($request->filled('is_active'), fn ($query) => $query->where('is_active', $request->boolean('is_active')))
+                ->when($request->filled('attendance_method'), fn ($query) => $query->where('attendance_method', $request->input('attendance_method')))
                 ->orderBy('last_name')->orderBy('first_name')->paginate(15)->withQueryString(),
         ]);
     }
@@ -38,7 +54,7 @@ class EmployeeController extends Controller
      */
     public function create(): View
     {
-        return view('employees.create', ['workUnits' => $this->workUnits()]);
+        return view('employees.create', ['workUnits' => $this->workUnits(), 'nextBiometricId' => $this->nextBiometricId()]);
     }
 
     /**
@@ -49,7 +65,9 @@ class EmployeeController extends Controller
         $data = $request->validated();
         $data['office_id'] = WorkUnit::findOrFail($data['work_unit_id'])->office_id;
         $data['access_code'] = $data['attendance_method'] === 'access_code' ? $data['access_code'] : null;
-        Employee::create($data);
+        Cache::lock('employees-biometric-id', 30)->block(10, function () use ($data): void {
+            Employee::create([...$data, 'biometric_id' => $this->nextBiometricId()]);
+        });
 
         return redirect()->route('employees.index')->with('success', 'Empleado registrado correctamente.');
     }
@@ -96,6 +114,11 @@ class EmployeeController extends Controller
         $employee->delete();
 
         return redirect()->route('employees.index')->with('success', 'Empleado desactivado correctamente.');
+    }
+
+    private function nextBiometricId(): int
+    {
+        return (int) Employee::withTrashed()->max('biometric_id') + 1;
     }
 
     private function workUnits(): Collection

@@ -16,6 +16,8 @@ interface ProtocolInterface
 
     public function setUser($userData);
 
+    public function deleteUser(int $uid): bool;
+
     public function getFingerprints($uid);
 
     public function setFingerprints($uid, array $templates);

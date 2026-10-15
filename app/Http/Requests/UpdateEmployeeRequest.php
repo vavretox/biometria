@@ -45,18 +45,12 @@ class UpdateEmployeeRequest extends FormRequest
             'memo_date' => ['nullable', 'date'],
             'memo_number' => ['nullable', 'string', 'max:50'],
             'department' => ['nullable', 'string', 'max:100'],
-            'biometric_id' => [
-                'nullable',
-                Rule::requiredIf(fn (): bool => in_array($this->input('attendance_method'), ['biometric', 'automatic'], true)),
-                'integer',
-                'min:1',
-                Rule::unique('employees')->ignore($this->route('employee')),
-            ],
+            'biometric_id' => ['exclude'],
             'attendance_method' => ['required', Rule::in(['biometric', 'access_code', 'automatic'])],
             'access_code' => [
                 'nullable',
                 Rule::requiredIf(fn (): bool => $this->input('attendance_method') === 'access_code'
-                    && blank($this->route('employee')?->access_code)),
+                    && ! $this->route('employee')?->hasUsableAccessCode()),
                 'string',
                 'min:4',
                 'max:20',

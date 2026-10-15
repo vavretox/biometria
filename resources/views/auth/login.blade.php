@@ -7,6 +7,6 @@
 <label class='grid gap-2 text-sm font-semibold'>Correo<input class='rounded-xl border border-slate-300 px-4 py-3' name='email' type='email' value='{{ old('email') }}' required autofocus></label>
 <label class='grid gap-2 text-sm font-semibold'>Contraseña<input class='rounded-xl border border-slate-300 px-4 py-3' name='password' type='password' required></label>
 <label class='flex gap-2 text-sm'><input name='remember' type='checkbox' value='1'> Recordarme</label>
-<button class='rounded-xl bg-emerald-500 px-5 py-3 font-bold text-white'>Iniciar sesión</button>
+<button class='rounded-xl bg-emerald-600 px-5 py-3 font-bold text-white'>Iniciar sesión</button>
 </form></div></main>
 @endsection

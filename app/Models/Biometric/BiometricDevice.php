@@ -62,8 +62,12 @@ class BiometricDevice extends Model
         return $colors[$this->connection_status] ?? 'secondary';
     }
 
-    public function getStatusTextAttribute()
+    public function getStatusTextAttribute(): string
     {
+        if ($this->connection_status === 'connected' && $this->isConnectionCheckOverdue()) {
+            return 'Verificación vencida';
+        }
+
         $statuses = [
             'connected' => 'Conectado',
             'disconnected' => 'Desconectado',
@@ -96,9 +100,14 @@ class BiometricDevice extends Model
         return $query->where('is_active', true);
     }
 
-    public function isConnected()
+    public function isConnected(): bool
     {
-        return $this->connection_status === 'connected';
+        return $this->connection_status === 'connected' && ! $this->isConnectionCheckOverdue();
+    }
+
+    public function isConnectionCheckOverdue(): bool
+    {
+        return $this->last_connection_test === null || $this->last_connection_test->lt(now()->subMinutes(35));
     }
 
     public function testConnection()

@@ -6,12 +6,17 @@ use App\Http\Controllers\Controller;
 use App\Models\Biometric\BiometricCommunicationLog;
 use App\Models\Biometric\BiometricDevice;
 use App\Models\Biometric\BiometricDeviceProfile;
+use App\Models\Employee;
 use App\Services\Biometric\Adapters\DeviceAdapter;
 use App\Services\Biometric\BiometricDeviceService;
 use App\Services\Biometric\BiometricSyncService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
+use Illuminate\View\View;
 
 class BiometricDeviceController extends Controller
 {
@@ -28,7 +33,83 @@ class BiometricDeviceController extends Controller
 
         $profiles = BiometricDeviceProfile::where('is_active', true)->get();
 
-        return view('biometric.devices.index', compact('devices', 'profiles'));
+        $connectionAlerts = BiometricDevice::active()
+            ->where(function ($query): void {
+                $query->where('connection_status', '!=', 'connected')
+                    ->orWhereNull('last_connection_test')
+                    ->orWhere('last_connection_test', '<', now()->subMinutes(35));
+            })
+            ->orderBy('device_name')
+            ->get(['id', 'device_name', 'connection_status', 'connection_error', 'last_connection_test']);
+
+        return view('biometric.devices.index', compact('devices', 'profiles', 'connectionAlerts'));
+    }
+
+    public function connectionHistory(Request $request): View
+    {
+        $filters = $request->validate([
+            'device_id' => ['nullable', 'integer', 'exists:biometric_devices,id'],
+            'status' => ['nullable', Rule::in(['success', 'failed'])],
+            'start_date' => ['nullable', 'date_format:Y-m-d'],
+            'end_date' => ['nullable', 'date_format:Y-m-d', ...($request->filled('start_date') ? ['after_or_equal:start_date'] : [])],
+        ]);
+
+        $logs = BiometricCommunicationLog::with('device:id,device_name,device_ip,device_port')
+            ->where('command', 'connect')
+            ->when($filters['device_id'] ?? null, fn ($query, $id) => $query->where('device_id', $id))
+            ->when($filters['status'] ?? null, fn ($query, $status) => $query->where('status', $status))
+            ->when($filters['start_date'] ?? null, fn ($query, $date) => $query->whereDate('created_at', '>=', $date))
+            ->when($filters['end_date'] ?? null, fn ($query, $date) => $query->whereDate('created_at', '<=', $date))
+            ->orderByDesc('created_at')->orderByDesc('id')
+            ->paginate(30)->withQueryString();
+        $devices = BiometricDevice::orderBy('device_name')->get(['id', 'device_name']);
+
+        return view('biometric.devices.connection-history', compact('logs', 'devices', 'filters'));
+    }
+
+    public function edit(BiometricDevice $device): View
+    {
+        return view('biometric.devices.edit', compact('device'));
+    }
+
+    public function update(Request $request, BiometricDevice $device): RedirectResponse
+    {
+        $data = $request->validate([
+            'device_name' => ['required', 'string', 'max:100', Rule::unique('biometric_devices', 'device_name')->ignore($device)],
+            'device_ip' => ['required', 'ip'],
+            'device_port' => ['required', 'integer', 'between:1,65535'],
+            'manufacturer' => ['required', 'string', 'max:50'],
+            'device_model' => ['nullable', 'string', 'max:50'],
+            'location' => ['nullable', 'string', 'max:100'],
+            'timezone' => ['required', 'timezone'],
+            'protocol' => ['required', Rule::in(['ZKProtocol', 'HTTPAPI', 'Serial', 'WebSocket'])],
+            'connection_timeout' => ['required', 'integer', 'between:5,300'],
+            'sync_interval' => ['required', 'integer', 'between:5,1440'],
+            'auto_sync' => ['required', 'boolean'],
+            'is_active' => ['required', 'boolean'],
+            'api_key' => ['exclude_unless:protocol,HTTPAPI', 'nullable', 'string', 'max:255'],
+            'api_secret' => ['exclude_unless:protocol,HTTPAPI', 'nullable', 'string', 'max:255'],
+        ]);
+
+        foreach (['api_key', 'api_secret'] as $credential) {
+            if (! isset($data[$credential]) || $data[$credential] === '') {
+                unset($data[$credential]);
+            }
+        }
+
+        $device->fill($data);
+        if ($device->isDirty(['manufacturer', 'device_model'])) {
+            $device->capabilities = DeviceAdapter::getCapabilities($device->manufacturer, $device->device_model ?? 'default');
+        }
+        if ($device->isDirty(['device_ip', 'device_port', 'protocol', 'api_key', 'api_secret'])) {
+            $device->connection_status = 'disconnected';
+            $device->connection_error = null;
+            $device->last_connection_test = null;
+        }
+        $device->save();
+
+        return redirect()->route('biometric.devices.index')
+            ->with('success', 'Dispositivo actualizado correctamente.');
     }
 
     public function store(Request $request)
@@ -127,7 +208,13 @@ class BiometricDeviceController extends Controller
 
             return response()->json([
                 'success' => $result,
-                'message' => $result ? 'Conexión exitosa' : 'No se pudo conectar',
+                'message' => $result
+                    ? ($this->deviceService->timeSynchronized
+                        ? 'Conexión exitosa. Hora sincronizada con Bolivia (UTC−4).'
+                        : 'Conexión exitosa, pero no se pudo sincronizar la hora: '.$this->deviceService->timeSynchronizationError)
+                    : ($device->connection_error ?: 'No se pudo conectar'),
+                'time_synchronized' => $this->deviceService->timeSynchronized,
+                'timezone' => config('services.biometric.timezone'),
                 'device' => $device->device_name,
                 'status' => $device->connection_status,
             ]);
@@ -139,23 +226,105 @@ class BiometricDeviceController extends Controller
         }
     }
 
-    public function syncEmployees($deviceId, Request $request)
+    public function deviceUsers(BiometricDevice $device, Request $request): JsonResponse
     {
+        abort_unless($request->user()?->is_admin, 403);
+        $deviceId = $device->id;
+        abort_unless($device->protocol === 'ZKProtocol', 422, 'Esta función está disponible para dispositivos ZKTeco.');
+
+        try {
+            $users = collect($this->deviceService->getUsers($deviceId))->map(fn (array $user): array => $this->deviceUserIdentity($user))->values();
+            $request->session()->put('biometric_user_selection.'.$deviceId, $users->keyBy('uid')->all());
+
+            return response()->json(['users' => $users]);
+        } catch (\Exception $exception) {
+            return response()->json(['success' => false, 'message' => 'No se pudieron consultar los usuarios: '.$exception->getMessage()], 500);
+        } finally {
+            $this->deviceService->disconnect();
+        }
+    }
+
+    public function deleteDeviceUsers(BiometricDevice $device, Request $request): JsonResponse
+    {
+        abort_unless($request->user()?->is_admin, 403);
+        $validated = $request->validate([
+            'user_ids' => ['required', 'array', 'min:1', 'max:100'],
+            'user_ids.*' => ['required', 'integer', 'min:1', 'max:65535', 'distinct'],
+            'confirmed' => ['required', 'accepted'],
+        ]);
+        $deviceId = $device->id;
+        $snapshot = $request->session()->get('biometric_user_selection.'.$deviceId, []);
+        foreach ($validated['user_ids'] as $uid) {
+            abort_unless(isset($snapshot[$uid]) && $snapshot[$uid]['role'] === 0, 422, 'Consulte la lista y seleccione usuarios sin privilegios de administrador.');
+        }
+        abort_unless($device->protocol === 'ZKProtocol', 422, 'Esta función está disponible para dispositivos ZKTeco.');
+        $deleted = [];
+
+        try {
+            $currentUsers = collect($this->deviceService->getUsers($deviceId))->map(fn (array $user): array => $this->deviceUserIdentity($user))->keyBy('uid');
+            foreach ($validated['user_ids'] as $uid) {
+                if ($currentUsers->get($uid) !== $snapshot[$uid]) {
+                    return response()->json(['success' => false, 'message' => 'La lista del reloj cambió. Actualícela antes de eliminar usuarios.'], 409);
+                }
+            }
+            foreach ($validated['user_ids'] as $uid) {
+                $this->deviceService->deleteUser($deviceId, (int) $uid);
+                $deleted[] = (int) $uid;
+                unset($snapshot[$uid]);
+                $request->session()->put('biometric_user_selection.'.$deviceId, $snapshot);
+            }
+
+            return response()->json(['success' => true, 'message' => count($deleted).' usuarios eliminados del biométrico.', 'deleted' => $deleted]);
+        } catch (\Exception $exception) {
+            return response()->json(['success' => false, 'message' => 'Eliminados '.count($deleted).' usuarios. No se pudo completar la operación: '.$exception->getMessage(), 'deleted' => $deleted], 500);
+        } finally {
+            $this->deviceService->disconnect();
+        }
+    }
+
+    /** @return array{uid: int, userid: string, name: string, role: int} */
+    private function deviceUserIdentity(array $user): array
+    {
+        return ['uid' => (int) ($user['uid'] ?? 0), 'userid' => (string) ($user['userid'] ?? ''), 'name' => (string) ($user['name'] ?? ''), 'role' => (int) ($user['role'] ?? -1)];
+    }
+
+    public function employeesForSync(): JsonResponse
+    {
+        abort_unless(request()->user()?->is_admin, 403);
+
+        $employees = Employee::query()->where('is_active', true)
+            ->with('workUnit:id,name')->orderBy('last_name')->orderBy('first_name')
+            ->get(['id', 'first_name', 'last_name', 'maternal_last_name', 'employee_code', 'work_unit_id'])
+            ->map(fn (Employee $employee): array => [
+                'id' => $employee->id,
+                'name' => $employee->full_name,
+                'code' => $employee->employee_code,
+                'unit_id' => $employee->work_unit_id,
+                'unit_name' => $employee->workUnit?->name ?? 'Sin unidad',
+            ]);
+
+        return response()->json(['employees' => $employees]);
+    }
+
+    public function syncEmployees($deviceId, Request $request): JsonResponse
+    {
+        abort_unless($request->user()?->is_admin, 403);
+        $validated = $request->validate([
+            'employee_ids' => ['required', 'array', 'min:1'],
+            'employee_ids.*' => ['required', 'integer', 'distinct', Rule::exists('employees', 'id')->where('is_active', true)->whereNull('deleted_at')],
+            'include_fingerprints' => ['nullable', 'boolean'],
+        ], ['employee_ids.required' => 'Seleccione al menos un empleado para enviar.', 'employee_ids.min' => 'Seleccione al menos un empleado para enviar.']);
+
         try {
             $device = BiometricDevice::findOrFail($deviceId);
-
-            $employeeIds = $request->validate([
-                'employee_ids' => ['nullable', 'array'],
-                'employee_ids.*' => ['integer', 'exists:employees,id'],
-                'include_fingerprints' => ['nullable', 'boolean'],
-            ])['employee_ids'] ?? null;
-            $result = $this->syncService->pushEmployees($device, $employeeIds, $request->boolean('include_fingerprints'));
+            $result = $this->syncService->pushEmployees($device, $validated['employee_ids'], $request->boolean('include_fingerprints'));
             $synced = $result['sent'];
+            $errors = $result['errors'];
 
             return response()->json([
-                'success' => true,
-                'message' => "Sincronizados {$synced} empleados",
-                'data' => ['synced' => $synced],
+                'success' => $errors === 0,
+                'message' => "Enviados o actualizados {$synced} empleados. Errores: {$errors}.",
+                'data' => $result,
             ]);
         } catch (\Exception $e) {
             return response()->json([
@@ -165,16 +334,25 @@ class BiometricDeviceController extends Controller
         }
     }
 
-    public function pullBiometrics($deviceId)
+    public function pullBiometrics($deviceId, Request $request)
     {
+        abort_unless($request->user()?->is_admin, 403);
+        $request->validate(['include_fingerprints' => ['nullable', 'boolean']]);
         try {
             $device = BiometricDevice::findOrFail($deviceId);
-            $result = $this->syncService->pullEmployeesAndFingerprints($device);
+            $includeFingerprints = $request->boolean('include_fingerprints', true);
+            $result = $this->syncService->pullEmployeesAndFingerprints($device, $includeFingerprints);
             $result['stored_fingerprints'] = $device->biometricTemplates()->count();
-            $message = 'Vinculados '.$result['matched'].' empleados y descargadas '.$result['fingerprints'].' huellas.';
+            $message = $includeFingerprints
+                ? 'Vinculados '.$result['matched'].' empleados y descargadas '.$result['fingerprints'].' huellas.'
+                : 'Importados o vinculados '.$result['matched'].' usuarios del biométrico.';
 
-            if ($result['matched'] > 0 && $result['fingerprints'] === 0) {
+            if ($includeFingerprints && $result['matched'] > 0 && $result['fingerprints'] === 0) {
                 $message = 'El biométrico entregó '.$result['matched'].' usuario(s), pero ninguna plantilla de huella. Verifique que las huellas estén enroladas en el equipo y que su firmware permita exportarlas.';
+            }
+
+            if ($result['created'] > 0) {
+                $message .= ' Importados '.$result['created'].' empleado(s) nuevos; complete sus datos personales y laborales.';
             }
 
             if ($result['unmatched'] > 0) {

@@ -40,7 +40,7 @@ class AutomaticAttendanceService
                 continue;
             }
 
-            $schedule = $employee->scheduleForDate($date) ?? $employee->workSchedule;
+            $schedule = $employee->attendanceScheduleForDate($date);
             $day = $schedule?->days->firstWhere('day_of_week', $date->isoWeekday());
 
             if (! $day?->is_working_day) {

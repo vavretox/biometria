@@ -4,6 +4,7 @@ namespace App\Services\Biometric\Protocols;
 
 use App\Models\Biometric\BiometricDevice;
 use Carbon\Carbon;
+use Jmrashed\Zkteco\Lib\Helper\Util;
 use Jmrashed\Zkteco\Lib\ZKTeco;
 
 class ZKProtocol implements ProtocolInterface
@@ -81,6 +82,27 @@ class ZKProtocol implements ProtocolInterface
             $userData['role'] ?? 0,
             $userData['cardno'] ?? 0
         );
+    }
+
+    public function deleteUser(int $uid): bool
+    {
+        if (! $this->connected) {
+            throw new \RuntimeException('Dispositivo no conectado');
+        }
+
+        if ($uid < 1 || $uid > 65535) {
+            throw new \InvalidArgumentException('Identificador de usuario inválido.');
+        }
+
+        $response = $this->zk->removeUser($uid);
+
+        if ($response === false || strlen($this->zk->_data_recv) < 8) {
+            return false;
+        }
+
+        $header = unpack('vcommand', $this->zk->_data_recv);
+
+        return $header['command'] === Util::CMD_ACK_OK;
     }
 
     public function getFingerprints($uid)

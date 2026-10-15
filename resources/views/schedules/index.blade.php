@@ -8,7 +8,20 @@
 <h2 class='text-lg font-bold'>Jornadas configuradas</h2>
 <p class='text-sm text-slate-500'>Cada jornada puede ser continua o tener tramos de mañana y tarde.</p>
 </div>
-<div class='grid gap-4 md:grid-cols-2'>@forelse($schedules as $schedule)@php($day = $schedule->days->first())<article class='rounded-2xl bg-white p-5 shadow-sm'>
+<form method='GET' action='{{ route('schedules.index') }}' class='mb-4 flex flex-wrap items-end gap-3'>
+@if($selectedEmployeeId)<input type='hidden' name='employee_id' value='{{ $selectedEmployeeId }}'>@endif
+<label class='min-w-0 flex-1 text-sm font-medium'>Horario
+<select name='schedule_id' class='mt-1 w-full rounded-xl border-slate-300'>
+<option value=''>Seleccione un horario</option>
+@foreach($schedules as $schedule)
+<option value='{{ $schedule->id }}' @selected($selectedScheduleId == $schedule->id)>{{ $schedule->name }}</option>
+@endforeach
+</select>
+</label>
+<button class='rounded-xl bg-slate-900 px-5 py-2 font-semibold text-white'>Consultar</button>
+</form>
+@if($selectedScheduleId)
+<div class='grid gap-4 md:grid-cols-2'>@forelse($schedules->where('id', $selectedScheduleId) as $schedule)@php($day = $schedule->days->first())<article class='rounded-2xl bg-white p-5 shadow-sm'>
 <div class='flex items-start justify-between gap-3'>
 <div>
 <h3 class='font-bold'>{{ $schedule->name }}</h3>
@@ -46,21 +59,24 @@ Habilitar turno tarde
 </form>
 </details>
 </article>@empty<div class='rounded-2xl bg-white p-10 text-center text-slate-500'>Aún no hay horarios configurados.</div>@endforelse</div>
-<div class='mt-6 rounded-2xl bg-white p-6 shadow-sm'>
-<div class='mb-5'>
-<h2 class='text-lg font-bold'>Asignar horario a empleados</h2>
-<p class='text-sm text-slate-500'>Seleccione empleados, horario y vigencia. Una nueva asignación reemplaza solamente las fechas indicadas y conserva el historial.</p>
+@else
+<p class='text-sm text-slate-500'>Seleccione un horario para consultar sus detalles o editarlo.</p>
+@endif
+<details class='mt-6 rounded-2xl bg-white p-6 shadow-sm' @if(old('assignment_scope') !== null && $errors->any()) open @endif>
+<summary class='cursor-pointer text-lg font-bold'>Asignar horario a empleados</summary>
+<div class='mb-5 mt-4'>
+<p class='text-sm text-slate-500'>Seleccione empleados, horario, vigencia y días de aplicación. Máximo dos horarios por empleado en una misma vigencia. Solo se reemplazan los días seleccionados y se conserva el historial.</p>
 </div>
 <form method='POST' action='{{ route('schedules.assign') }}' class='grid gap-5'>@csrf<div class='grid gap-3 sm:grid-cols-2'>
 <label class='flex cursor-pointer gap-3 rounded-xl border border-slate-200 p-4'>
-<input type='radio' name='assignment_scope' value='selected' checked class='mt-1 border-slate-300 text-emerald-600'>
+<input type='radio' name='assignment_scope' value='selected' @checked(old('assignment_scope', 'selected') === 'selected') class='mt-1 border-slate-300 text-emerald-600'>
 <span>
 <b class='block'>Uno o algunos</b>
 <small class='text-slate-500'>Seleccione uno o más empleados.</small>
 </span>
 </label>
 <label class='flex cursor-pointer gap-3 rounded-xl border border-slate-200 p-4'>
-<input type='radio' name='assignment_scope' value='all' class='mt-1 border-slate-300 text-emerald-600'>
+<input type='radio' name='assignment_scope' value='all' @checked(old('assignment_scope') === 'all') class='mt-1 border-slate-300 text-emerald-600'>
 <span>
 <b class='block'>Todos los empleados</b>
 <small class='text-slate-500'>Se asignará a todo el personal activo.</small>
@@ -68,40 +84,54 @@ Habilitar turno tarde
 </label>
 </div>
 <div class='grid gap-4 md:grid-cols-2'>
-<label class='text-sm font-medium'>Empleados<select name='employee_ids[]' multiple size='8' class='mt-1 w-full rounded-xl border-slate-300'>@foreach($employees as $employee)<option value='{{ $employee->id }}'>{{ $employee->last_name }} {{ $employee->maternal_last_name }} {{ $employee->first_name }} · Ítem {{ $employee->item_number }}</option>@endforeach</select>
+<label class='text-sm font-medium'>Empleados<select name='employee_ids[]' multiple size='8' class='mt-1 w-full rounded-xl border-slate-300'>@foreach($employees as $employee)<option value='{{ $employee->id }}' @selected(in_array($employee->id, old('employee_ids', [])))>{{ $employee->last_name }} {{ $employee->maternal_last_name }} {{ $employee->first_name }} · Ítem {{ $employee->item_number }}</option>@endforeach</select>
 <small class='mt-1 block text-slate-500'>Use Ctrl para elegir varios empleados.</small>
 </label>
 <label class='text-sm font-medium'>Horario<select name='work_schedule_id' required class='mt-1 w-full rounded-xl border-slate-300'>
-<option value=''>Seleccione horario</option>@foreach($schedules as $schedule)<option value='{{ $schedule->id }}'>{{ $schedule->name }}</option>@endforeach</select>
+<option value=''>Seleccione horario</option>@foreach($schedules as $schedule)<option value='{{ $schedule->id }}' @selected(old('work_schedule_id') == $schedule->id)>{{ $schedule->name }}</option>@endforeach</select>
 </label>
-<label class='text-sm font-medium'>Duración<select id='period-type' name='period_type' required class='mt-1 w-full rounded-xl border-slate-300'>
-<option value='indefinite'>Indefinido</option>
-<option value='day'>Un día</option>
-<option value='week'>Una semana</option>
-<option value='month'>Un mes</option>
-<option value='year'>Un año</option>
-<option value='custom'>Rango personalizado</option>
-</select>
+<label class='text-sm font-medium'>Fecha de inicio<input id='assignment-starts-on' type='date' name='starts_on' value='{{ old('starts_on', today()->toDateString()) }}' required class='mt-1 w-full rounded-xl border-slate-300'>
 </label>
-<label class='text-sm font-medium'>Fecha de inicio<input id='assignment-starts-on' type='date' name='starts_on' value='{{ today()->toDateString() }}' required class='mt-1 w-full rounded-xl border-slate-300'>
-</label>
-<label id='assignment-end-wrapper' class='hidden text-sm font-medium'>Fecha final<input id='assignment-ends-on' type='date' name='ends_on' class='mt-1 w-full rounded-xl border-slate-300'>
-<small class='mt-1 block text-slate-500'>Incluye el día final.</small>
+<label class='text-sm font-medium'>Fecha final<input id='assignment-ends-on' type='date' name='ends_on' value='{{ old('ends_on', today()->toDateString()) }}' required class='mt-1 w-full rounded-xl border-slate-300'>
+<small class='mt-1 block text-slate-500'>Incluye el día final. Puede ser la misma fecha de inicio.</small>
 </label>
 </div>
+<fieldset id='assignment-weekdays' disabled class='rounded-xl border border-slate-200 p-4 opacity-50'>
+<legend class='px-2 text-sm font-bold'>Días en que aplica este horario</legend>
+<input type='hidden' name='weekdays_present' value='1'>
+<div class='flex flex-wrap gap-4'>
+@foreach([1 => 'Lunes', 2 => 'Martes', 3 => 'Miércoles', 4 => 'Jueves', 5 => 'Viernes', 6 => 'Sábado', 7 => 'Domingo'] as $weekday => $label)
+<label class='flex items-center gap-2 text-sm'><input type='checkbox' name='weekdays[]' value='{{ $weekday }}' @checked(in_array($weekday, old('weekdays', [1, 2, 3, 4, 5]))) class='rounded border-slate-300 text-emerald-600'>{{ $label }}</label>
+@endforeach
+</div>
+<p id='assignment-weekdays-help' aria-live='polite' class='mt-3 text-xs text-slate-500'>Ejemplo: asigne un horario para lunes, miércoles y viernes; luego otro para martes y jueves.</p>
+</fieldset>
 <div>
 <button class='rounded-xl bg-slate-900 px-6 py-3 font-semibold text-white'>Aplicar horario</button>
 </div>
 </form>
-</div>
+</details>
 <div class='mt-6 rounded-2xl bg-white p-6 shadow-sm'>
 <div class='flex flex-wrap items-end justify-between gap-3'>
 <div>
 <h2 class='text-lg font-bold'>Empleados con horario asignado</h2>
 <p class='text-sm text-slate-500'>Consulta el horario actual, futuro e histórico de cada empleado.</p>
 </div>
-<span class='rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700'>{{ $assignments->total() }} asignaciones</span>
+@if($assignments)<span class='rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700'>{{ $assignments->total() }} asignaciones</span>@endif
 </div>
+<form method='GET' action='{{ route('schedules.index') }}' class='mt-4 flex flex-wrap items-end gap-3'>
+@if($selectedScheduleId)<input type='hidden' name='schedule_id' value='{{ $selectedScheduleId }}'>@endif
+<label class='min-w-0 flex-1 text-sm font-medium'>Empleado
+<select name='employee_id' class='mt-1 w-full rounded-xl border-slate-300'>
+<option value=''>Seleccione un empleado</option>
+@foreach($assignmentEmployees as $employee)
+<option value='{{ $employee->id }}' @selected($selectedEmployeeId == $employee->id)>{{ $employee->last_name }} {{ $employee->maternal_last_name }} {{ $employee->first_name }} · Ítem {{ $employee->item_number }}</option>
+@endforeach
+</select>
+</label>
+<button class='rounded-xl bg-slate-900 px-5 py-2 font-semibold text-white'>Consultar</button>
+</form>
+@if($assignments)
 <div class='mt-5 overflow-x-auto'>
 <table class='min-w-full divide-y divide-slate-200 text-sm'>
 <thead class='bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500'>
@@ -114,7 +144,7 @@ Habilitar turno tarde
 <tr class='hover:bg-slate-50'>
 <td class='px-4 py-3'><span class='block font-semibold text-slate-900'>{{ $assignment->employee->last_name }} {{ $assignment->employee->maternal_last_name }} {{ $assignment->employee->first_name }}</span><span class='text-xs text-slate-500'>Ítem {{ $assignment->employee->item_number ?: 'Sin ítem' }}</span></td>
 <td class='px-4 py-3 text-slate-600'>{{ $assignment->employee->office?->name ?? 'Sin oficina' }}</td>
-<td class='px-4 py-3 font-semibold text-slate-900'>{{ $assignment->workSchedule->name }}</td>
+<td class='px-4 py-3 font-semibold text-slate-900'>{{ $assignment->workSchedule->name }}<span class='mt-1 block text-xs font-normal text-slate-500'>{{ collect($assignment->weekdays ?? range(1, 7))->map(fn ($weekday) => [1 => 'Lun', 2 => 'Mar', 3 => 'Mié', 4 => 'Jue', 5 => 'Vie', 6 => 'Sáb', 7 => 'Dom'][$weekday])->join(', ') }}</span></td>
 <td class='px-4 py-3 text-slate-600'><span class='block'>Desde {{ $assignment->starts_on->format('d/m/Y') }}</span><span class='text-xs'>{{ $assignment->ends_on ? 'Hasta '.$assignment->ends_on->format('d/m/Y') : 'Sin fecha final' }}</span></td>
 <td class='px-4 py-3'>
 @if($isFuture)<span class='rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-700'>Programado</span>
@@ -130,6 +160,9 @@ Habilitar turno tarde
 </table>
 </div>
 <div class='mt-4'>{{ $assignments->links() }}</div>
+@else
+<p class='mt-4 text-sm text-slate-500'>Seleccione un empleado para consultar sus horarios e historial.</p>
+@endif
 </div>
 </section>
 <aside class='rounded-2xl bg-white p-6 shadow-sm'>
@@ -166,7 +199,15 @@ Habilitar turno tarde
 </form>
 </aside>
 </div>
+@if($errors->has('schedule_limit'))
+<dialog id='schedule-limit-dialog' aria-labelledby='schedule-limit-title' class='m-auto w-full max-w-md rounded-2xl border-0 bg-white p-6 shadow-2xl backdrop:bg-slate-950/50'>
+<h2 id='schedule-limit-title' class='text-lg font-bold'>Límite de horarios</h2>
+<p class='mt-3 text-sm text-slate-600'>{{ $errors->first('schedule_limit') }}</p>
+<form method='dialog' class='mt-5'><button autofocus class='rounded-xl bg-slate-900 px-5 py-2 font-semibold text-white'>Entendido</button></form>
+</dialog>
+@endif
 <script>
+document.getElementById('schedule-limit-dialog')?.showModal();
 document.querySelectorAll('[data-afternoon-toggle]').forEach((toggle) => {
     const fields = document.getElementById(toggle.dataset.target);
 
@@ -181,18 +222,21 @@ document.querySelectorAll('[data-afternoon-toggle]').forEach((toggle) => {
     synchronizeAfternoonFields();
 });
 
-const periodType = document.getElementById('period-type');
-const endWrapper = document.getElementById('assignment-end-wrapper');
+const startInput = document.getElementById('assignment-starts-on');
 const endInput = document.getElementById('assignment-ends-on');
-
-const synchronizePeriodFields = () => {
-    const isCustom = periodType.value === 'custom';
-    endWrapper.classList.toggle('hidden', !isCustom);
-    endInput.disabled = !isCustom;
-    endInput.required = isCustom;
+const weekdaysFieldset = document.getElementById('assignment-weekdays');
+const weekdaysHelp = document.getElementById('assignment-weekdays-help');
+const synchronizeDateRange = () => {
+    endInput.min = startInput.value;
+    const isMultipleDays = Boolean(startInput.value && endInput.value && endInput.value > startInput.value);
+    weekdaysFieldset.disabled = !isMultipleDays;
+    weekdaysFieldset.classList.toggle('opacity-50', !isMultipleDays);
+    weekdaysHelp.textContent = isMultipleDays
+        ? 'Seleccione los días de la semana en que aplica el horario dentro del rango elegido.'
+        : 'Para una sola fecha se usa automáticamente el día seleccionado. Los días de la semana se habilitan al elegir un rango de más de un día.';
 };
-
-periodType.addEventListener('change', synchronizePeriodFields);
-synchronizePeriodFields();
+startInput.addEventListener('change', synchronizeDateRange);
+endInput.addEventListener('change', synchronizeDateRange);
+synchronizeDateRange();
 </script>
 @endsection

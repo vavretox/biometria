@@ -92,6 +92,11 @@ class HttpApiProtocol implements ProtocolInterface
         }
     }
 
+    public function deleteUser(int $uid): bool
+    {
+        throw new \RuntimeException('La eliminación de usuarios no está disponible para este protocolo.');
+    }
+
     public function getFingerprints($uid)
     {
         if (! $this->connected) {

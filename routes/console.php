@@ -11,3 +11,8 @@ Artisan::command('inspire', function () {
 Schedule::command('attendance:generate-automatic')
     ->everyFifteenMinutes()
     ->withoutOverlapping(30);
+
+Schedule::command('biometric:check-connections')
+    ->everyThirtyMinutes()
+    ->withoutOverlapping()
+    ->runInBackground();

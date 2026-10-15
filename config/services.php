@@ -14,6 +14,10 @@ return [
     |
     */
 
+    'biometric' => [
+        'timezone' => 'America/La_Paz',
+    ],
+
     'postmark' => [
         'key' => env('POSTMARK_API_KEY'),
     ],

@@ -38,8 +38,8 @@
             <label class='grid gap-2 text-sm font-semibold'>Cargo<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='position' value='{{ old('position', $record?->position) }}'></label>
             <label class='grid gap-2 text-sm font-semibold'>Unidad o departamento<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='department' value='{{ old('department', $record?->department) }}'></label>
             <label class='grid gap-2 text-sm font-semibold'>Modalidad de asistencia *<select id='attendance-method' class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='attendance_method' required><option value='biometric' @selected(old('attendance_method', $record?->attendance_method ?? 'biometric') === 'biometric')>Biometría</option><option value='access_code' @selected(old('attendance_method', $record?->attendance_method) === 'access_code')>Código de acceso</option><option value='automatic' @selected(old('attendance_method', $record?->attendance_method) === 'automatic')>Marcación automática · Ejecutivo</option></select></label>
-            <label id='biometric-id-field' class='grid gap-2 text-sm font-semibold'>ID biométrico<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='biometric_id' type='number' min='1' value='{{ old('biometric_id', $record?->biometric_id) }}'><small class='font-normal text-slate-500'>Obligatorio para biometría y personal ejecutivo automático.</small></label>
-            <label id='access-code-field' class='grid gap-2 text-sm font-semibold'>Código de acceso<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='access_code' type='password' minlength='4' maxlength='20' autocomplete='new-password' placeholder='{{ $record?->access_code ? 'Dejar vacío para conservar' : 'Código de 4 a 20 caracteres' }}'><small class='font-normal text-slate-500'>Se almacena cifrado y se envía como contraseña al dispositivo.</small></label>
+            <label id='biometric-id-field' class='grid gap-2 text-sm font-semibold'>ID biométrico<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='biometric_id' type='number' min='1' value='{{ $record?->biometric_id ?? ($record ? '' : $nextBiometricId) }}' readonly><small class='font-normal text-slate-500'>Asignado automáticamente; no se puede modificar.</small></label>
+            <label id='access-code-field' class='grid gap-2 text-sm font-semibold'>Código de acceso<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='access_code' type='password' minlength='4' maxlength='20' autocomplete='new-password' placeholder='{{ $record?->hasUsableAccessCode() ? 'Dejar vacío para conservar' : 'Código de 4 a 20 caracteres' }}'><small class='font-normal text-slate-500'>Se almacena cifrado y se envía como contraseña al dispositivo.</small></label>
             <label class='grid gap-2 text-sm font-semibold'>Fecha de ingreso<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='hire_date' type='date' value='{{ old('hire_date', $record?->hire_date?->format('Y-m-d')) }}'></label>
             <label class='grid gap-2 text-sm font-semibold'>Fecha de finalización<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='employment_end_date' type='date' value='{{ old('employment_end_date', $record?->employment_end_date?->format('Y-m-d')) }}'></label>
             <label class='grid gap-2 text-sm font-semibold'>Fecha de memo<input class='rounded-xl border border-slate-300 px-4 py-3 font-normal' name='memo_date' type='date' value='{{ old('memo_date', $record?->memo_date?->format('Y-m-d')) }}'></label>
@@ -52,13 +52,11 @@
 
 <script>
 const attendanceMethod = document.getElementById('attendance-method');
-const biometricIdField = document.getElementById('biometric-id-field');
 const accessCodeField = document.getElementById('access-code-field');
 
 const synchronizeAttendanceFields = () => {
     const usesAccessCode = attendanceMethod.value === 'access_code';
     accessCodeField.classList.toggle('hidden', !usesAccessCode);
-    biometricIdField.querySelector('input').required = !usesAccessCode;
 };
 
 attendanceMethod.addEventListener('change', synchronizeAttendanceFields);
@@ -66,6 +64,6 @@ synchronizeAttendanceFields();
 </script>
 
 <div class='mt-8 flex flex-wrap gap-3 border-t border-slate-200 pt-6'>
-    <button class='rounded-xl bg-emerald-500 px-6 py-3 font-bold text-white'>Guardar empleado</button>
+    <button class='rounded-xl bg-emerald-600 px-6 py-3 font-bold text-white'>Guardar empleado</button>
     <a href='{{ route('employees.index') }}' class='rounded-xl bg-slate-200 px-6 py-3 font-bold'>Cancelar</a>
 </div>

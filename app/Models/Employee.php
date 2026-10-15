@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Carbon\CarbonInterface;
 use Database\Factories\EmployeeFactory;
+use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -61,7 +62,8 @@ class Employee extends Model
         if ($this->relationLoaded('scheduleAssignments')) {
             return $this->scheduleAssignments
                 ->filter(fn (WorkScheduleAssignment $assignment): bool => $assignment->starts_on->toDateString() <= $dateString
-                    && ($assignment->ends_on === null || $assignment->ends_on->toDateString() >= $dateString))
+                    && ($assignment->ends_on === null || $assignment->ends_on->toDateString() >= $dateString)
+                    && in_array($date->dayOfWeekIso, $assignment->weekdays ?? range(1, 7), true))
                 ->sortByDesc('starts_on')
                 ->first()?->workSchedule;
         }
@@ -70,7 +72,26 @@ class Employee extends Model
             ->whereDate('starts_on', '<=', $dateString)
             ->where(fn ($query) => $query->whereNull('ends_on')->orWhereDate('ends_on', '>=', $dateString))
             ->latest('starts_on')
-            ->first()?->workSchedule;
+            ->get()
+            ->first(fn (WorkScheduleAssignment $assignment): bool => in_array($date->dayOfWeekIso, $assignment->weekdays ?? range(1, 7), true))?->workSchedule;
+    }
+
+    public function attendanceScheduleForDate(CarbonInterface $date): ?WorkSchedule
+    {
+        $schedule = $this->scheduleForDate($date);
+        if ($schedule !== null) {
+            return $schedule;
+        }
+
+        $hasRestrictedAssignment = $this->relationLoaded('scheduleAssignments')
+            ? $this->scheduleAssignments->contains(fn (WorkScheduleAssignment $assignment): bool => $assignment->weekdays !== null
+                && $assignment->starts_on->toDateString() <= $date->toDateString()
+                && ($assignment->ends_on === null || $assignment->ends_on->toDateString() >= $date->toDateString()))
+            : $this->scheduleAssignments()->whereNotNull('weekdays')
+                ->whereDate('starts_on', '<=', $date->toDateString())
+                ->where(fn ($query) => $query->whereNull('ends_on')->orWhereDate('ends_on', '>=', $date->toDateString()))->exists();
+
+        return $hasRestrictedAssignment ? null : $this->workSchedule;
     }
 
     public function leaveRequests(): HasMany
@@ -102,10 +123,25 @@ class Employee extends Model
     public function getAttendanceIdentifierAttribute(): string
     {
         if ($this->attendance_method === 'access_code') {
-            return $this->access_code ? 'Código configurado' : 'Código pendiente';
+            if ($this->hasUsableAccessCode()) {
+                return 'Código configurado';
+            }
+
+            return filled($this->getAttributes()['access_code'] ?? null)
+                ? 'Código ilegible: volver a configurar'
+                : 'Código pendiente';
         }
 
         return $this->biometric_id ? 'ID biométrico '.$this->biometric_id : 'ID biométrico pendiente';
+    }
+
+    public function hasUsableAccessCode(): bool
+    {
+        try {
+            return filled($this->access_code);
+        } catch (DecryptException) {
+            return false;
+        }
     }
 
     protected function casts(): array

@@ -24,8 +24,8 @@ class StoreWorkUnitRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name' => ['required', 'string', 'max:150', Rule::unique('work_units')],
-            'code' => ['required', 'string', 'max:30', Rule::unique('work_units')],
+            'name' => ['required', 'string', 'max:150', Rule::unique('work_units')->ignore($this->route('workUnit'))],
+            'code' => ['required', 'string', 'max:30', Rule::unique('work_units')->ignore($this->route('workUnit'))],
             'description' => ['nullable', 'string', 'max:500'],
         ];
     }

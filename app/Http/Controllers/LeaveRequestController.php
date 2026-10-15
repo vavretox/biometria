@@ -27,9 +27,44 @@ class LeaveRequestController extends Controller
     public function store(Request $request): RedirectResponse
     {
         abort_unless($request->user()?->is_admin, 403);
+        LeaveRequest::create([
+            ...$this->validatedLeave($request),
+            'status' => 'approved',
+            'approved_by' => $request->user()->id,
+            'approved_at' => now(),
+        ]);
+
+        return back()->with('success', 'Permiso registrado y aprobado.');
+    }
+
+    public function update(Request $request, LeaveRequest $leaveRequest): RedirectResponse
+    {
+        abort_unless($request->user()?->is_admin, 403);
+        $validated = $this->validatedLeave($request, $leaveRequest);
+
+        if ($leaveRequest->status === 'pending') {
+            $validated = [...$validated, 'status' => 'approved', 'approved_by' => $request->user()->id, 'approved_at' => now()];
+        }
+
+        $leaveRequest->update($validated);
+
+        return redirect()->route('attendance.index', $request->query())->with('success', 'Permiso actualizado correctamente.');
+    }
+
+    public function destroy(Request $request, LeaveRequest $leaveRequest): RedirectResponse
+    {
+        abort_unless($request->user()?->is_admin, 403);
+        $leaveRequest->delete();
+
+        return back()->with('success', 'Permiso eliminado correctamente.');
+    }
+
+    /** @return array<string, mixed> */
+    private function validatedLeave(Request $request, ?LeaveRequest $leaveRequest = null): array
+    {
         $validated = $request->validate([
             'employee_id' => ['required', 'exists:employees,id'],
-            'leave_type_id' => ['required', Rule::exists('leave_types', 'id')->where('is_active', true)],
+            'leave_type_id' => ['required', Rule::exists('leave_types', 'id')->where(fn ($query) => $query->where('is_active', true)->when($leaveRequest?->leave_type_id, fn ($query, $id) => $query->orWhere('id', $id)))],
             'starts_on' => ['required', 'date'],
             'ends_on' => [
                 'required',
@@ -71,9 +106,8 @@ class LeaveRequestController extends Controller
         }
 
         $validated['type'] = LeaveType::findOrFail($validated['leave_type_id'])->code;
-        LeaveRequest::create($validated);
 
-        return back()->with('success', 'Solicitud de permiso registrada.');
+        return $validated;
     }
 
     public function approve(Request $request, LeaveRequest $leaveRequest): RedirectResponse

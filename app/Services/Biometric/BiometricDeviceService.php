@@ -14,15 +14,28 @@ class BiometricDeviceService
 
     protected $isConnected = false;
 
-    public function connect($deviceId)
+    protected string $connectionSource = 'operation';
+
+    public ?bool $timeSynchronized = null;
+
+    public ?string $timeSynchronizationError = null;
+
+    public function connect(int $deviceId): bool
     {
         $device = BiometricDevice::find($deviceId);
         if (! $device) {
             throw new \Exception('Dispositivo no encontrado');
         }
 
+        if ($this->isConnected) {
+            $this->disconnect();
+        }
+
         $this->device = $device;
+        $this->isConnected = false;
         $this->protocol = $this->getProtocolInstance($device);
+
+        $startedAt = hrtime(true);
 
         try {
             $result = $this->protocol->connect($device);
@@ -34,33 +47,30 @@ class BiometricDeviceService
                 $device->last_connection_test = now();
                 $device->save();
 
-                $this->logCommunication('connect', 'success', ['device' => $device->device_name]);
+                $this->logCommunication('connect', 'success', ['source' => $this->connectionSource], responseTimeMs: (int) ((hrtime(true) - $startedAt) / 1_000_000));
 
                 return true;
             }
 
-            return false;
+            throw new \RuntimeException('No se pudo conectar al dispositivo');
         } catch (\Exception $e) {
+            $this->isConnected = false;
+            $device->last_connection_test = now();
             $device->connection_status = 'error';
             $device->connection_error = $e->getMessage();
             $device->save();
 
-            $this->logCommunication('connect', 'failed', [], $e->getMessage());
+            $this->logCommunication('connect', 'failed', ['source' => $this->connectionSource], $e->getMessage(), responseTimeMs: (int) ((hrtime(true) - $startedAt) / 1_000_000));
             throw $e;
         }
     }
 
-    public function disconnect()
+    public function disconnect(): bool
     {
         if ($this->protocol) {
             $this->protocol->disconnect();
         }
         $this->isConnected = false;
-
-        if ($this->device) {
-            $this->device->connection_status = 'disconnected';
-            $this->device->save();
-        }
 
         return true;
     }
@@ -77,15 +87,34 @@ class BiometricDeviceService
         return new $protocolClass;
     }
 
-    public function testConnection($device)
+    public function testConnection(BiometricDevice $device, string $source = 'manual'): bool
     {
+        $this->connectionSource = $source;
+        $this->timeSynchronized = null;
+        $this->timeSynchronizationError = null;
+
         try {
             $this->connect($device->id);
-            $this->disconnect();
+            try {
+                $timezone = config('services.biometric.timezone');
+                $this->setTime($device->id, now($timezone));
+                $this->timeSynchronized = true;
+                $this->device->update(['timezone' => $timezone]);
+            } catch (\Exception $exception) {
+                $this->timeSynchronized = false;
+                $this->timeSynchronizationError = $exception->getMessage();
+            }
 
             return true;
         } catch (\Exception $e) {
             return false;
+        } finally {
+            if ($this->isConnected) {
+                $this->disconnect();
+            }
+
+            $this->connectionSource = 'operation';
+            $device->refresh();
         }
     }
 
@@ -116,6 +145,23 @@ class BiometricDeviceService
         } catch (\Exception $e) {
             $this->logCommunication('set_user', 'failed', ['user' => $userData['userid'] ?? 'unknown'], $e->getMessage());
             throw $e;
+        }
+    }
+
+    public function deleteUser(int $deviceId, int $uid): bool
+    {
+        $this->ensureConnection($deviceId);
+
+        try {
+            if (! $this->protocol->deleteUser($uid)) {
+                throw new \RuntimeException('El biométrico no confirmó la eliminación del usuario.');
+            }
+            $this->logCommunication('delete_user', 'success', ['uid' => $uid]);
+
+            return true;
+        } catch (\Exception $exception) {
+            $this->logCommunication('delete_user', 'failed', ['uid' => $uid], $exception->getMessage());
+            throw $exception;
         }
     }
 
@@ -205,15 +251,18 @@ class BiometricDeviceService
     {
         $this->ensureConnection($deviceId);
 
-        $time = $time ?? now();
+        $time = $time ?? now(config('services.biometric.timezone'));
 
         try {
             $result = $this->protocol->setTime($time);
-            $this->logCommunication('set_time', 'success', ['time' => $time->toDateTimeString()]);
+            if ($result === false || $result === null || (is_array($result) && ($result['success'] ?? true) === false)) {
+                throw new \RuntimeException('El biométrico no confirmó la sincronización de hora.');
+            }
+            $this->logCommunication('set_time', 'success', ['time' => $time->toDateTimeString(), 'timezone' => $time->timezoneName, 'source' => $this->connectionSource]);
 
             return $result;
         } catch (\Exception $e) {
-            $this->logCommunication('set_time', 'failed', ['time' => $time->toDateTimeString()], $e->getMessage());
+            $this->logCommunication('set_time', 'failed', ['time' => $time->toDateTimeString(), 'timezone' => $time->timezoneName, 'source' => $this->connectionSource], $e->getMessage());
             throw $e;
         }
     }
@@ -255,7 +304,7 @@ class BiometricDeviceService
         }
     }
 
-    protected function logCommunication($command, $status, $requestData = [], $errorMessage = null, $responseCount = null)
+    protected function logCommunication($command, $status, $requestData = [], $errorMessage = null, $responseCount = null, ?int $responseTimeMs = null)
     {
         $log = new BiometricCommunicationLog;
         $log->device_id = $this->device->id;
@@ -263,7 +312,7 @@ class BiometricDeviceService
         $log->status = $status;
         $log->request_data = $requestData;
         $log->error_message = $errorMessage;
-        $log->response_time_ms = null; // Se puede calcular
+        $log->response_time_ms = $responseTimeMs;
         $log->additional_info = ['response_count' => $responseCount];
         $log->save();
 

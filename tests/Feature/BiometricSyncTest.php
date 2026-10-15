@@ -77,7 +77,7 @@ class BiometricSyncTest extends TestCase
 
         $result = (new BiometricSyncService($gateway))->pullEmployeesAndFingerprints($device);
 
-        $this->assertSame(['matched' => 1, 'fingerprints' => 1, 'unmatched' => 0, 'without_fingerprints' => 0], $result);
+        $this->assertSame(['matched' => 1, 'created' => 0, 'fingerprints' => 1, 'unmatched' => 0, 'without_fingerprints' => 0], $result);
         $this->assertSame(105, $employee->fresh()->biometric_id);
         $template = BiometricTemplate::firstOrFail();
         $this->assertSame(base64_encode('binary-template'), $template->template_data);
@@ -97,7 +97,7 @@ class BiometricSyncTest extends TestCase
 
         $result = (new BiometricSyncService($gateway))->pullEmployeesAndFingerprints($device);
 
-        $this->assertSame(['matched' => 1, 'fingerprints' => 0, 'unmatched' => 0, 'without_fingerprints' => 1], $result);
+        $this->assertSame(['matched' => 1, 'created' => 0, 'fingerprints' => 0, 'unmatched' => 0, 'without_fingerprints' => 1], $result);
         $this->assertSame(0, BiometricTemplate::count());
     }
 

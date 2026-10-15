@@ -107,7 +107,7 @@ class OperationsModulesTest extends TestCase
         ]);
         $employee = Employee::factory()->create(['work_schedule_id' => $schedule->id]);
         Attendance::factory()->create(['employee_id' => $employee->id, 'checked_at' => '2026-09-01 08:03:00']);
-        Attendance::factory()->create(['employee_id' => $employee->id, 'checked_at' => '2026-09-01 16:01:00']);
+        Attendance::factory()->create(['employee_id' => $employee->id, 'checked_at' => '2026-09-01 16:01:00', 'type' => 'out']);
 
         $this->withoutVite()->actingAs($administrator)->get(route('attendance.index', [
             'from' => '2026-09-01',
@@ -179,7 +179,7 @@ class OperationsModulesTest extends TestCase
             'assignment_scope' => 'selected',
             'employee_ids' => [$employee->id],
             'work_schedule_id' => $schedule->id,
-            'period_type' => 'indefinite',
+            'ends_on' => today()->addYear()->toDateString(),
             'starts_on' => today()->toDateString(),
         ])->assertRedirect();
 
@@ -187,7 +187,7 @@ class OperationsModulesTest extends TestCase
         $this->assertDatabaseHas('work_schedule_assignments', [
             'employee_id' => $employee->id,
             'work_schedule_id' => $schedule->id,
-            'ends_on' => null,
+            'ends_on' => today()->addYear()->toDateString().' 00:00:00',
         ]);
     }
 
@@ -205,7 +205,7 @@ class OperationsModulesTest extends TestCase
             'assignment_scope' => 'selected',
             'employee_ids' => $selectedEmployees->modelKeys(),
             'work_schedule_id' => $schedule->id,
-            'period_type' => 'indefinite',
+            'ends_on' => today()->addYear()->toDateString(),
             'starts_on' => today()->toDateString(),
         ])->assertRedirect()->assertSessionHas('success', 'Horario asignado a 2 empleado(s) para el periodo indicado.');
 
@@ -218,7 +218,7 @@ class OperationsModulesTest extends TestCase
         $this->actingAs($administrator)->post(route('schedules.assign'), [
             'assignment_scope' => 'all',
             'work_schedule_id' => $schedule->id,
-            'period_type' => 'indefinite',
+            'ends_on' => today()->addYear()->toDateString(),
             'starts_on' => today()->toDateString(),
         ])->assertRedirect()->assertSessionHas('success', 'Horario asignado a 3 empleado(s) para el periodo indicado.');
 
@@ -242,7 +242,7 @@ class OperationsModulesTest extends TestCase
             'assignment_scope' => 'selected',
             'employee_ids' => [$employee->id],
             'work_schedule_id' => $temporarySchedule->id,
-            'period_type' => 'week',
+            'ends_on' => '2026-08-16',
             'starts_on' => '2026-08-10',
         ])->assertRedirect();
 
@@ -265,7 +265,7 @@ class OperationsModulesTest extends TestCase
             'ends_on' => '2026-12-31 00:00:00',
         ]);
 
-        $this->withoutVite()->actingAs($administrator)->get(route('schedules.index'))
+        $this->withoutVite()->actingAs($administrator)->get(route('schedules.index', ['employee_id' => $employee->id]))
             ->assertOk()
             ->assertSee('Empleados con horario asignado')
             ->assertSee($employee->last_name)
@@ -383,6 +383,10 @@ class OperationsModulesTest extends TestCase
         ])->assertRedirect();
 
         $leaveRequest = LeaveRequest::firstOrFail();
+        $this->assertSame('approved', $leaveRequest->status);
+        $this->assertSame($administrator->id, $leaveRequest->approved_by);
+        $this->assertNotNull($leaveRequest->approved_at);
+
         $this->actingAs($administrator)->put(route('leaves.approve', $leaveRequest))->assertRedirect();
 
         $this->assertDatabaseHas('leave_requests', [

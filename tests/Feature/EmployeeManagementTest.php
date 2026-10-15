@@ -6,12 +6,150 @@ use App\Models\Biometric\BiometricDevice;
 use App\Models\BiometricTemplate;
 use App\Models\Employee;
 use App\Models\User;
+use Illuminate\Encryption\Encrypter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
 class EmployeeManagementTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_new_biometric_ids_increment_and_ignore_manual_values(): void
+    {
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        Employee::factory()->create(['biometric_id' => 40])->delete();
+
+        foreach ([41, 42] as $expectedId) {
+            $data = $this->employeeUpdateData(Employee::factory()->make());
+            $data['biometric_id'] = 999;
+
+            $this->post(route('employees.store'), $data)->assertRedirectToRoute('employees.index');
+
+            $employee = Employee::where('employee_code', $data['employee_code'])->firstOrFail();
+            $this->assertSame($expectedId, (int) $employee->biometric_id);
+        }
+    }
+
+    public function test_biometric_id_starts_at_one_and_cannot_be_changed(): void
+    {
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        $data = $this->employeeUpdateData(Employee::factory()->make());
+        unset($data['biometric_id']);
+
+        $this->post(route('employees.store'), $data)->assertRedirectToRoute('employees.index');
+        $employee = Employee::where('employee_code', $data['employee_code'])->firstOrFail();
+        $this->assertSame(1, (int) $employee->biometric_id);
+
+        $data['biometric_id'] = 999;
+        $this->put(route('employees.update', $employee), $data)->assertRedirectToRoute('employees.index');
+        $this->assertSame(1, (int) $employee->fresh()->biometric_id);
+
+        $this->withoutVite()->get(route('employees.create'))
+            ->assertViewHas('nextBiometricId', 2)
+            ->assertSee("value='2' readonly", false);
+    }
+
+    public function test_employee_filters_combine_unit_status_and_attendance_method(): void
+    {
+        $employee = Employee::factory()->create(['attendance_method' => 'automatic', 'is_active' => false]);
+        Employee::factory()->create(['work_unit_id' => $employee->work_unit_id, 'attendance_method' => 'automatic', 'is_active' => true]);
+        Employee::factory()->create(['work_unit_id' => $employee->work_unit_id, 'attendance_method' => 'biometric', 'is_active' => false]);
+        Employee::factory()->create(['attendance_method' => 'automatic', 'is_active' => false]);
+        $this->withoutVite()->actingAs(User::factory()->create(['is_admin' => true]));
+
+        $this->get(route('employees.index', [
+            'work_unit_id' => $employee->work_unit_id,
+            'is_active' => '0',
+            'attendance_method' => 'automatic',
+        ]))->assertViewHas('employees', fn ($employees): bool => $employees->total() === 1 && $employees->first()->is($employee))
+            ->assertSee('Limpiar');
+
+        $this->get(route('employees.index'))->assertViewHas('employees', fn ($employees): bool => $employees->total() === 4);
+    }
+
+    public function test_employee_pages_remain_accessible_with_an_unreadable_access_code(): void
+    {
+        $administrator = User::factory()->create(['is_admin' => true]);
+        $employee = $this->employeeWithUnreadableAccessCode();
+
+        $this->withoutVite()->actingAs($administrator)->get(route('employees.index'))
+            ->assertSee('Código ilegible: volver a configurar');
+
+        $this->get(route('employees.edit', $employee))
+            ->assertSee('Código de 4 a 20 caracteres')
+            ->assertDontSee('Dejar vacío para conservar');
+    }
+
+    public function test_an_unreadable_access_code_requires_a_replacement(): void
+    {
+        $administrator = User::factory()->create(['is_admin' => true]);
+        $employee = $this->employeeWithUnreadableAccessCode();
+        $ciphertext = $employee->getRawOriginal('access_code');
+        $data = $this->employeeUpdateData($employee);
+
+        $this->actingAs($administrator)->put(route('employees.update', $employee), $data)
+            ->assertSessionHasErrors('access_code');
+
+        $this->assertSame($ciphertext, $employee->fresh()->getRawOriginal('access_code'));
+    }
+
+    public function test_administrator_can_replace_an_unreadable_access_code(): void
+    {
+        $administrator = User::factory()->create(['is_admin' => true]);
+        $employee = $this->employeeWithUnreadableAccessCode();
+        $data = $this->employeeUpdateData($employee);
+        $data['access_code'] = '845931';
+
+        $this->actingAs($administrator)->put(route('employees.update', $employee), $data)
+            ->assertRedirectToRoute('employees.index');
+
+        $this->assertSame('845931', $employee->fresh()->access_code);
+        $this->assertNotSame('845931', $employee->fresh()->getRawOriginal('access_code'));
+    }
+
+    public function test_a_valid_access_code_is_preserved_when_left_blank(): void
+    {
+        $administrator = User::factory()->create(['is_admin' => true]);
+        $employee = Employee::factory()->create(['attendance_method' => 'access_code', 'access_code' => '845931']);
+        $data = $this->employeeUpdateData($employee);
+
+        $this->actingAs($administrator)->put(route('employees.update', $employee), $data)
+            ->assertRedirectToRoute('employees.index');
+
+        $this->assertSame('845931', $employee->fresh()->access_code);
+    }
+
+    public function test_employee_listing_distinguishes_configured_and_pending_access_codes(): void
+    {
+        $administrator = User::factory()->create(['is_admin' => true]);
+        Employee::factory()->create(['attendance_method' => 'access_code', 'access_code' => '845931']);
+        Employee::factory()->create(['attendance_method' => 'access_code', 'access_code' => null]);
+
+        $this->withoutVite()->actingAs($administrator)->get(route('employees.index'))
+            ->assertSee('Código configurado')
+            ->assertSee('Código pendiente')
+            ->assertDontSee('845931');
+    }
+
+    private function employeeWithUnreadableAccessCode(): Employee
+    {
+        $employee = Employee::factory()->create(['attendance_method' => 'access_code']);
+        $encrypter = new Encrypter(str_repeat('x', 32), 'AES-256-CBC');
+        $employee->getConnection()->table('employees')->where('id', $employee->id)->update([
+            'access_code' => $encrypter->encryptString('7391'),
+        ]);
+
+        return $employee->refresh();
+    }
+
+    /** @return array<string, mixed> */
+    private function employeeUpdateData(Employee $employee): array
+    {
+        return $employee->only([
+            'work_unit_id', 'employee_code', 'item_number', 'employee_type', 'first_name',
+            'last_name', 'identity_document', 'attendance_method', 'biometric_id',
+        ]);
+    }
 
     public function test_administrator_can_create_employee(): void
     {
